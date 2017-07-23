@@ -1,0 +1,6 @@
+[k8slocal]
+name=k8slocal
+baseurl=http://192.168.199.122:8000/rpms/
+gpgcheck=0
+enabled=1
+priority=1

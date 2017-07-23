@@ -2,7 +2,7 @@
 set -x
 set -e
 
-HTTP_SERVER=192.168.56.1:8000
+HTTP_SERVER=192.168.199.122:8000
 KUBE_HA=true
 
 KUBE_REPO_PREFIX=gcr.io/google_containers
@@ -14,6 +14,13 @@ if [ "$root" -ne 0 ] ;then
     exit 1
 fi
 
+kube::config_yum()
+{
+    /bin/rm -f /etc/yum.repos.d/k8slocal.repo
+    wget http://$HTTP_SERVER/k8slocal.repo -O /etc/yum.repos.d/k8slocal.repo
+    yum clean all
+}
+
 kube::install_docker()
 {
     set +e
@@ -21,14 +28,11 @@ kube::install_docker()
     i=$?
     set -e
     if [ $i -ne 0 ]; then
-        curl -L http://$HTTP_SERVER/rpms/docker.tar.gz > /tmp/docker.tar.gz
-        tar zxf /tmp/docker.tar.gz -C /tmp
-        yum localinstall -y /tmp/docker/*.rpm
+        yum install -y docker --enablerepo=k8slocal
         systemctl enable docker.service && systemctl start docker.service
         kube::config_docker
     fi
     echo docker has been installed
-    rm -rf /tmp/docker /tmp/docker.tar.gz
 }
 
 kube::config_docker()
@@ -43,6 +47,11 @@ cat <<EOF >>/etc/sysctl.conf
 EOF
 
     sed -i -e 's/DOCKER_STORAGE_OPTIONS=/DOCKER_STORAGE_OPTIONS="-s overlay --selinux-enabled=false"/g' /etc/sysconfig/docker-storage
+    cat >/etc/docker/daemon.json<<EOF
+{
+"registry-mirrors": ["http://hub-mirror.c.163.com"]
+}
+EOF
 
     systemctl daemon-reload && systemctl restart docker.service
 }
@@ -62,6 +71,7 @@ kube::load_images()
         k8s-dns-sidecar-amd64_1.14.1
         etcd_v3.0.17
         flannel-amd64_v0.7.1
+        kubernetes-dashboard-amd64
     )
 
     for i in "${!images[@]}"; do
@@ -82,10 +92,7 @@ kube::install_k8s()
     i=$?
     set -e
     if [ $i -ne 0 ]; then
-        curl -L http://$HTTP_SERVER/rpms/k8s.tar.gz > /tmp/k8s.tar.gz
-        tar zxf /tmp/k8s.tar.gz -C /tmp
-        yum localinstall -y  /tmp/k8s/*.rpm
-        rm -rf /tmp/k8s*
+        yum install -y  kubeadm kubelet kubectl kubernetes-cni
         # 增加上限，每个node最多可以跑1024个pod
         sed -i 's/--allow-privileged=true/--allow-privileged=true --max-pods=1024/g' /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
         systemctl enable kubelet.service && systemctl daemon-reload && systemctl start kubelet.service && rm -rf /etc/kubernetes
@@ -94,10 +101,12 @@ kube::install_k8s()
 
 kube::config_firewalld()
 {
-    systemctl disable firewalld && systemctl stop firewalld
+    set +e
+    [ -f /usr/sbin/firewalld ] && systemctl disable firewalld && systemctl stop firewalld
     # iptables -A IN_public_allow -p tcp -m tcp --dport 9898 -m conntrack --ctstate NEW -j ACCEPT
     # iptables -A IN_public_allow -p tcp -m tcp --dport 6443 -m conntrack --ctstate NEW -j ACCEPT
     # iptables -A IN_public_allow -p tcp -m tcp --dport 10250 -m conntrack --ctstate NEW -j ACCEPT
+    set -e
 }
 
 kube::get_env()
@@ -124,10 +133,7 @@ kube::install_keepalived()
     set -e
     if [ $i -ne 0 ]; then
         ip addr add ${KUBE_VIP}/32 dev ${VIP_INTERFACE}
-        curl -L http://$HTTP_SERVER/rpms/keepalived.tar.gz > /tmp/keepalived.tar.gz
-        tar zxf /tmp/keepalived.tar.gz -C /tmp
-        yum localinstall -y  /tmp/keepalived/*.rpm
-        rm -rf /tmp/keepalived*
+        yum install -y  keepalived
         systemctl enable keepalived.service && systemctl start keepalived.service
         kube::config_keepalived
     fi
@@ -189,22 +195,27 @@ kube::save_master_ip()
 {
     if [ ${KUBE_HA} == true ];then
         kube::get_etcd_endpoint $@
-        set +e; ssh root@$etcd_endpoint "etcdctl mk ha_master ${LOCAL_IP}"; set -e
+        set +e; ssh -o StrictHostKeyChecking=no root@$etcd_endpoint "etcdctl mk ha_master ${LOCAL_IP}"; set -e
     fi
 }
 
 kube::copy_master_config()
 {
     kube::get_etcd_endpoint $@
-    local master_ip=$(ssh root@$etcd_endpoint "etcdctl get /ha_master")
+    local master_ip=$(ssh -o StrictHostKeyChecking=no root@$etcd_endpoint "etcdctl get /ha_master")
     mkdir -p /etc/kubernetes
-    scp -r root@${master_ip}:/etc/kubernetes/* /etc/kubernetes/
+    scp -o StrictHostKeyChecking=no -r root@${master_ip}:/etc/kubernetes/* /etc/kubernetes/
     systemctl daemon-reload && systemctl start kubelet
 }
 
 kube::set_label()
 {
     export KUBECONFIG=/etc/kubernetes/admin.conf
+    set +e
+    if ! grep -q KUBECONFIG ~/.bashrc 2>/dev/null; then
+        echo "export KUBECONFIG=/etc/kubernetes/admin.conf" >>~/.bashrc
+    fi
+    set -e
     local hstnm=`hostname`
     local lowhstnm=$(echo $hstnm | tr '[A-Z]' '[a-z]')
     until kubectl get no | grep -i $lowhstnm; do sleep 1; done
@@ -260,6 +271,7 @@ kube::master_up()
 {
     shift
 
+    kube::config_yum
     kube::install_docker
 
     kube::load_images
@@ -274,6 +286,9 @@ kube::master_up()
     kube::config_kubeadm $@
 
     kubeadm init --config=$HOME/kubeadm-config.yml
+    #kubeadm init --apiserver-advertise-address=$advertiseAddress --external-etcd-endpoints=$etcd0,$etcd1,$etcd2 --pod-network-cidr 10.240.0.0/12
+    #kubeadm init --apiserver-advertise-address=$advertiseAddress --pod-network-cidr 10.240.0.0/12
+
 
     echo -e "\033[32m 赶紧找地方记录上面的token！ \033[0m"
 
@@ -290,6 +305,7 @@ kube::replica_up()
 {
     shift
 
+    kube::config_yum
     kube::install_docker
 
     kube::load_images
@@ -308,6 +324,7 @@ kube::node_up()
 {
     shift
 
+    kube::config_yum
     kube::install_docker
 
     kube::load_images
@@ -335,6 +352,8 @@ kube::tear_down()
     rm -rf /var/lib/cni
     rm -rf /etc/systemd/system/docker.service.d/*
     ip link del cni0
+    ip link del docker0
+    ip link del flannel.1
 }
 
 kube::test()
