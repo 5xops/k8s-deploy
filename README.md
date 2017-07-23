@@ -21,6 +21,8 @@
 离线安装的基本思路是，在k8s-deploy目录下，临时启个http server， 节点上会从此拉取所依赖镜像和rpms
 
 ```
+# cd rpms
+# createrepo .
 # python -m SimpleHTTPServer
 Serving HTTP on 0.0.0.0 port 8000 ...
 ```
@@ -82,6 +84,16 @@ curl -L http://192.168.56.1:8000/k8s-deploy.sh | bash -s replica \
 ```
 curl -L http://192.168.56.1:8000/k8s-deploy.sh |  bash -s join --token 32d98a.4076a0f48b5abd3f 192.168.56.103:6443
 ```
+
+## 安装kubernetes dashboard
+
+dashboard服务通过NodePort提供service端口，默认31000，如需更换请修改dashboard/kubernetes-dashboard.yaml
+
+```
+curl -L http://192.168.56.1:8000/k8s-deploy.sh |  bash -s dashboard
+```
+
+安装完成后通过 `http://VIP:31000/` 访问
 
 ## 总结
 

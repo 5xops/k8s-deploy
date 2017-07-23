@@ -71,7 +71,10 @@ kube::load_images()
         k8s-dns-sidecar-amd64_1.14.1
         etcd_v3.0.17
         flannel-amd64_v0.7.1
-        kubernetes-dashboard-amd64
+        kubernetes-dashboard-amd64_v1.6.2
+        heapster-amd64_v1.3.0
+        heapster-grafana-amd64_v4.0.2
+        heapster-influxdb-amd64_v1.1.1
     )
 
     for i in "${!images[@]}"; do
@@ -133,7 +136,7 @@ kube::install_keepalived()
     set -e
     if [ $i -ne 0 ]; then
         ip addr add ${KUBE_VIP}/32 dev ${VIP_INTERFACE}
-        yum install -y  keepalived
+        yum install -y keepalived
         systemctl enable keepalived.service && systemctl start keepalived.service
         kube::config_keepalived
     fi
@@ -267,6 +270,17 @@ kube::install_cni()
   kubectl apply -f http://$HTTP_SERVER/network/kube-flannel.yml --namespace=kube-system
 }
 
+kube::install_dashboard()
+{
+  # install kubernetes-dashboard and heapster
+  export KUBECONFIG=/etc/kubernetes/admin.conf
+  kubectl apply -f http://$HTTP_SERVER/dashboard/heapster/influxdb.yaml --namespace=kube-system
+  kubectl apply -f http://$HTTP_SERVER/dashboard/heapster/grafana.yaml --namespace=kube-system
+  kubectl apply -f http://$HTTP_SERVER/dashboard/heapster-rbac.yaml
+  kubectl apply -f http://$HTTP_SERVER/dashboard/heapster.yaml --namespace=kube-system
+  kubectl apply -f http://$HTTP_SERVER/dashboard/kubernetes-dashboard.yaml --namespace=kube-system
+}
+
 kube::master_up()
 {
     shift
@@ -325,6 +339,7 @@ kube::node_up()
     shift
 
     kube::config_yum
+
     kube::install_docker
 
     kube::load_images
@@ -380,12 +395,16 @@ main()
     "t" | "test" )
         kube::test  $@
         ;;
+    "dash" | "dashboard" )
+        kube::install_dashboard
+        ;;
     *)
         echo "usage: $0 m[master] | r[replica] | j[join] token | d[down] "
         echo "       $0 master to setup master "
         echo "       $0 replica to setup replica master "
         echo "       $0 join   to join master with token "
         echo "       $0 down   to tear all down ,inlude all data! so becarefull"
+        echo "       $0 dashboard   install kubernetes dashboard"
         echo "       unkown command $0 $@"
         ;;
     esac
